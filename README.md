@@ -2,7 +2,7 @@
 
 > **Note**: This is a BETA version. The SFX functionality is a little buggy at the moment but will be fixed in the near future.
 
-A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audio tracks (`.stream`) and sound effects (`.dat` banks) in *Grand Theft Auto: San Andreas*.
+A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audio tracks (`stream`) and sound effects (`.dat` banks) in *Grand Theft Auto: San Andreas*.
 
 ---
 
@@ -10,7 +10,7 @@ A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audi
 
 * **Stream Archive**
 
-  * Decodes `.stream` files by XOR’ing with the built-in key.
+  * Decodes `stream` files by XOR’ing with the built-in key.
   * Parses out each track header and raw OGG data.
   * Allows exporting individual tracks or all at once, replacing tracks, and rebuilding the file in place.
 
@@ -32,7 +32,7 @@ A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audi
 
 1. **Load**
 
-   * **Stream**: Select a `.stream` file — it’s XOR-decoded, headers parsed, and track list populated in the Treeview.
+   * **Stream**: Select a `stream` file — it’s XOR-decoded, headers parsed, and track list populated in the Treeview.
    * **SFX**: Point to your GTA SA root folder — it finds `audio/CONFIG`, parses pak and bank lookup data, then lists all sounds.
 
 2. **Export / Export All**

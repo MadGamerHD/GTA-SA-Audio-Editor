@@ -69,8 +69,8 @@ A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audi
 
 ### 🚀 Usage
 
-1. **Download** the `gta_sa_audio_editor.py` file.
-2. **Double-click** `gta_sa_audio_editor.py` (or run `python gta_sa_audio_editor.py`).
+1. **Download** the `gta_audio_editor.py` file.
+2. **Double-click** `gta_audio_editor.py` (or run `python gta_audio_editor.py`).
 3. The GUI window will launch—use the **Stream** and **SFX** tabs to begin editing.
 
 ---

@@ -1,7 +1,5 @@
 ## GTA SA Audio Editor (BETA)
 
-> **Note**: This is a BETA version. The SFX functionality is a little buggy at the moment but will be fixed in the near future.
-
 A simple, cross-platform GUI tool for extracting, replacing, and rebuilding audio tracks (`stream`) and sound effects (`.dat` banks) in *Grand Theft Auto: San Andreas*.
 
 ---

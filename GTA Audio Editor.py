@@ -7,6 +7,8 @@ import tempfile
 import pygame
 import wave
 import io
+from collections import defaultdict
+import time
 
 # Constants
 ENCODE_KEY = bytes.fromhex('EA3AC4A19AA814F348B0D7239DE8FFF1')
@@ -22,36 +24,27 @@ def run_in_thread(fn):
         threading.Thread(target=lambda: fn(*args, **kwargs), daemon=True).start()
     return wrapper
 
-def xor_in_place_stride(data: bytearray, key: bytes, progress_callback=None):
+def xor_in_place_simple(data: bytearray, key: bytes, progress_callback=None):
     """
-    XOR‐decrypt `data` in place using `key` by processing in stride‐based slices.
+    XOR-decrypt `data` in place using `key` in one single pass.
     Calls progress_callback(processed_bytes, total_bytes) periodically.
     """
     total = len(data)
     klen = len(key)
     processed = 0
-    # We'll update progress every time we finish XOR’ing one full "j" pass,
-    # but only call back if we've moved forward by at least 4096 bytes.
     last_report = 0
 
-    for j in range(klen):
-        # Take every klen‐th byte starting at j
-        sl = data[j:total:klen]
-        if not sl:
-            continue
-        # XOR that slice
-        xored = bytes(b ^ key[j] for b in sl)
-        data[j:total:klen] = xored
-
-        processed += len(sl)
-        # Call progress whenever we've passed another 4096 bytes
+    for i in range(total):
+        data[i] ^= key[i % klen]
+        processed += 1
         if progress_callback and (processed - last_report >= 4096):
             last_report = processed
-            progress_callback(min(processed, total), total)
+            progress_callback(processed, total)
 
     # Final callback to indicate completion
     if progress_callback:
         progress_callback(total, total)
+
 
 class StreamArchive:
     def __init__(self, path, progress_callback=None):
@@ -66,8 +59,8 @@ class StreamArchive:
         total = len(data)
         key = ENCODE_KEY
 
-        # Decrypt in place using stride‐based XOR
-        xor_in_place_stride(data, key, progress_callback)
+        # Decrypt in place using single-pass XOR
+        xor_in_place_simple(data, key, progress_callback)
 
         # Now parse decrypted data into tracks
         mv = memoryview(data)
@@ -103,11 +96,12 @@ class StreamArchive:
 
     def export(self, idx, out_dir):
         t = self.tracks[idx]
-        Path(out_dir, f"{t['name']}.ogg").write_bytes(t['data'])
+        out_path = Path(out_dir) / f"{t['name']}.ogg"
+        out_path.write_bytes(t['data'])
 
     def export_all(self, out_dir, progress_callback=None):
         total = len(self.tracks)
-        for i, _ in enumerate(self.tracks):
+        for i in range(total):
             self.export(i, out_dir)
             if progress_callback:
                 progress_callback(i + 1, total)
@@ -137,7 +131,7 @@ class StreamArchive:
             if progress_callback:
                 progress_callback(count, total)
 
-        # Re‐encrypt entire buffer in place
+        # Re-encrypt entire buffer in place
         key = ENCODE_KEY
         klen = len(key)
         total_buf = len(buf)
@@ -158,6 +152,7 @@ class StreamArchive:
             progress_callback(total_buf, total_buf)
 
         self.filepath.write_bytes(buf)
+
 
 class SFXArchive:
     def __init__(self, root, progress_callback=None):
@@ -194,11 +189,11 @@ class SFXArchive:
             messagebox.showerror('Error', f"BankLkup.dat not found in {self.config}")
             return
 
-        bank_entries = []
+        # Cache bank entries by package index
+        bank_map = defaultdict(list)  # pkg_idx -> list of (off, size)
         fmt = '<B3xII'
-        for entry in struct.iter_unpack(fmt, bl_data):
-            pkg_idx, off, size = entry
-            bank_entries.append((pkg_idx, off, size))
+        for pkg_idx, off, size in struct.iter_unpack(fmt, bl_data):
+            bank_map[pkg_idx].append((off, size))
 
         total_pkgs = len(packages)
         for pi, pkg_name in enumerate(packages):
@@ -213,15 +208,12 @@ class SFXArchive:
             data_len = len(data)
             mv_data = memoryview(data)
 
-            for pkg_idx, off, size in bank_entries:
-                if pkg_idx != pi:
-                    continue
-
+            # Look up entries for this package directly
+            for off, size in bank_map.get(pi, []):
                 if off < 0 or off + BANK_HEADER_SIZE > data_len:
                     continue
 
                 hdr = mv_data[off : off + BANK_HEADER_SIZE]
-
                 try:
                     count = struct.unpack_from('<H', hdr, 0)[0]
                 except struct.error:
@@ -260,11 +252,12 @@ class SFXArchive:
     def export(self, idx, out_dir):
         s = self.sounds[idx]
         wav = self._wrap_wav(s['pcm'], s['rate'])
-        Path(out_dir, f"{s['name']}.wav").write_bytes(wav)
+        out_path = Path(out_dir) / f"{s['name']}.wav"
+        out_path.write_bytes(wav)
 
     def export_all(self, out_dir, progress_callback=None):
         total = len(self.sounds)
-        for i, _ in enumerate(self.sounds):
+        for i in range(total):
             self.export(i, out_dir)
             if progress_callback:
                 progress_callback(i + 1, total)
@@ -275,9 +268,9 @@ class SFXArchive:
         self.sounds[idx]['pcm'] = pcm
 
     def rebuild(self, progress_callback=None):
-        pkg_map = {}
+        pkg_map = defaultdict(list)
         for s in self.sounds:
-            pkg_map.setdefault(s['pkg_file'], []).append(s)
+            pkg_map[s['pkg_file']].append(s)
 
         for pfile, sounds in pkg_map.items():
             orig = bytearray(pfile.read_bytes())
@@ -300,20 +293,26 @@ class SFXArchive:
         wf.close()
         return buf.getvalue()
 
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('GTA SA Audio Editor')
-        # Make window smaller
-        self.geometry('600x400')
+        self.geometry('600x450')  # slightly taller to fit time controls
 
         pygame.init()
         pygame.mixer.init()
 
         self.stream_arc = None
         self.sfx_arc = None
-        self.current_sound = None
+
+        # For playback tracking
         self.current_stream_temp = None
+        self.current_duration = 0.0
+
+        self.current_sound = None
+        self.current_sfx_length = 0.0
+        self.sfx_start_time = 0.0
 
         self._build_ui()
 
@@ -330,8 +329,17 @@ class App(tk.Tk):
 
     def _create_menu(self):
         menu = tk.Menu(self)
-        menu.add_command(label='Exit', command=self.destroy)
+        menu.add_command(label='Exit', command=self._on_exit)
         self.config(menu=menu)
+
+    def _on_exit(self):
+        # Clean up any temp files
+        if self.current_stream_temp:
+            try:
+                Path(self.current_stream_temp).unlink()
+            except Exception:
+                pass
+        self.destroy()
 
     def _build_stream_tab(self, notebook):
         st = ttk.Frame(notebook)
@@ -354,12 +362,28 @@ class App(tk.Tk):
         list_frame = ttk.Frame(st)
         list_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
-        self.stream_listbox = tk.Listbox(list_frame, height=15)
+        self.stream_listbox = tk.Listbox(list_frame, height=12)
         self.stream_listbox.pack(side='left', fill='both', expand=True)
 
         scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=self.stream_listbox.yview)
         scrollbar.pack(side='right', fill='y')
         self.stream_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Time label + seek slider
+        times_frame = ttk.Frame(st)
+        times_frame.pack(fill='x', padx=5, pady=5)
+
+        self.time_label = ttk.Label(times_frame, text="00:00 / 00:00")
+        self.time_label.pack(side='left')
+
+        self.seek_slider = ttk.Scale(
+            times_frame,
+            from_=0.0, to=1.0,
+            orient='horizontal',
+            command=self.on_seek
+        )
+        self.seek_slider.pack(fill='x', expand=True, side='left', padx=5)
+        self.seek_slider.state(['disabled'])
 
     def _build_sfx_tab(self, notebook):
         sx = ttk.Frame(notebook)
@@ -381,12 +405,28 @@ class App(tk.Tk):
         list_frame = ttk.Frame(sx)
         list_frame.pack(fill='both', expand=True, padx=5, pady=5)
 
-        self.sfx_listbox = tk.Listbox(list_frame, height=15)
+        self.sfx_listbox = tk.Listbox(list_frame, height=12)
         self.sfx_listbox.pack(side='left', fill='both', expand=True)
 
         scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=self.sfx_listbox.yview)
         scrollbar.pack(side='right', fill='y')
         self.sfx_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Time label + seek slider for SFX
+        sfx_times = ttk.Frame(sx)
+        sfx_times.pack(fill='x', padx=5, pady=5)
+
+        self.sfx_time_label = ttk.Label(sfx_times, text="00:00 / 00:00")
+        self.sfx_time_label.pack(side='left')
+
+        self.sfx_seek_slider = ttk.Scale(
+            sfx_times,
+            from_=0.0, to=1.0,
+            orient='horizontal',
+            command=self.on_sfx_seek
+        )
+        self.sfx_seek_slider.pack(fill='x', expand=True, side='left', padx=5)
+        self.sfx_seek_slider.state(['disabled'])
 
     @run_in_thread
     def load_stream(self):
@@ -490,16 +530,38 @@ class App(tk.Tk):
 
     def play_stream(self):
         sel = self.stream_listbox.curselection()
-        if sel and self.stream_arc:
-            idx = sel[0]
-            data = self.stream_arc.tracks[idx]['data']
-            tf = tempfile.NamedTemporaryFile(suffix='.ogg', delete=False)
-            tf.write(data)
-            tf.close()
-            self.stop_stream()
+        if not sel or not self.stream_arc:
+            messagebox.showwarning("No track", "Select a track first.")
+            return
+
+        idx = sel[0]
+        data = self.stream_arc.tracks[idx]['data']
+        tf = tempfile.NamedTemporaryFile(suffix='.ogg', delete=False)
+        tf.write(data)
+        tf.close()
+
+        self.stop_stream()
+
+        try:
             pygame.mixer.music.load(tf.name)
-            pygame.mixer.music.play()
-            self.current_stream_temp = tf.name
+        except pygame.error as e:
+            messagebox.showerror("Playback Error", f"Could not load OGG: {e}")
+            Path(tf.name).unlink(missing_ok=True)
+            return
+
+        # Determine total duration
+        try:
+            sound_obj = pygame.mixer.Sound(tf.name)
+            self.current_duration = sound_obj.get_length()
+        except pygame.error:
+            self.current_duration = 0.0
+
+        self.current_stream_temp = tf.name
+        pygame.mixer.music.play()
+
+        # Enable slider & start polling
+        self.seek_slider.state(['!disabled'])
+        self._update_time_loop()
 
     def stop_stream(self):
         if pygame.mixer.music.get_busy():
@@ -507,28 +569,142 @@ class App(tk.Tk):
         if self.current_stream_temp:
             try:
                 Path(self.current_stream_temp).unlink()
-            except:
+            except Exception:
                 pass
             self.current_stream_temp = None
 
+        # Reset UI
+        self.time_label.config(text="00:00 / 00:00")
+        self.seek_slider.config(value=0.0)
+        self.seek_slider.state(['disabled'])
+
+    def _update_time_loop(self):
+        if not pygame.mixer.music.get_busy():
+            # Playback stopped or finished
+            self.time_label.config(text="00:00 / 00:00")
+            self.seek_slider.config(value=0.0)
+            return
+
+        pos_ms = pygame.mixer.music.get_pos()
+        if pos_ms < 0:
+            self.after(100, self._update_time_loop)
+            return
+
+        current_secs = pos_ms / 1000.0
+        total = self.current_duration or 1.0
+        cur_m, cur_s = divmod(int(current_secs), 60)
+        tot_m, tot_s = divmod(int(total), 60)
+        self.time_label.config(text=f"{cur_m:02d}:{cur_s:02d} / {tot_m:02d}:{tot_s:02d}")
+        self.seek_slider.config(value=min(current_secs / total, 1.0))
+
+        self.after(100, self._update_time_loop)
+
+    def on_seek(self, slider_value):
+        if not self.current_stream_temp or self.current_duration <= 0:
+            return
+
+        ratio = float(slider_value)
+        target = ratio * self.current_duration
+
+        try:
+            pygame.mixer.music.play(start=target)
+        except TypeError:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.load(self.current_stream_temp)
+            try:
+                pygame.mixer.music.set_pos(target)
+            except Exception:
+                pass
+            pygame.mixer.music.play()
+
+        self._update_time_loop()
+
     def play_sfx(self):
         sel = self.sfx_listbox.curselection()
-        if sel and self.sfx_arc:
-            idx = sel[0]
-            snd = self.sfx_arc.sounds[idx]
-            wav = self.sfx_arc._wrap_wav(snd['pcm'], snd['rate'])
-            if self.current_sound:
-                self.current_sound.stop()
-            self.current_sound = pygame.mixer.Sound(buffer=wav)
-            self.current_sound.play()
+        if not sel or not self.sfx_arc:
+            messagebox.showwarning("No sound", "Select an SFX first.")
+            return
+
+        idx = sel[0]
+        snd = self.sfx_arc.sounds[idx]
+        wav = self.sfx_arc._wrap_wav(snd['pcm'], snd['rate'])
+        if self.current_sound:
+            self.current_sound.stop()
+
+        # Load into Sound and play
+        sound_obj = pygame.mixer.Sound(buffer=wav)
+        self.current_sound = sound_obj
+        self.current_sfx_length = sound_obj.get_length()
+        self.sfx_start_time = time.time()
+
+        sound_obj.play()
+
+        # Enable slider & start polling
+        self.sfx_seek_slider.state(['!disabled'])
+        self._update_sfx_time_loop()
 
     def stop_sfx(self):
         if self.current_sound:
             self.current_sound.stop()
+        self.current_sound = None
+
+        # Reset UI
+        self.sfx_time_label.config(text="00:00 / 00:00")
+        self.sfx_seek_slider.config(value=0.0)
+        self.sfx_seek_slider.state(['disabled'])
+
+    def _update_sfx_time_loop(self):
+        if not self.current_sound or not pygame.mixer.get_busy():
+            # Playback finished
+            self.sfx_time_label.config(text="00:00 / 00:00")
+            self.sfx_seek_slider.config(value=0.0)
+            return
+
+        elapsed = time.time() - self.sfx_start_time
+        total = self.current_sfx_length or 1.0
+        cur_m, cur_s = divmod(int(elapsed), 60)
+        tot_m, tot_s = divmod(int(total), 60)
+        self.sfx_time_label.config(text=f"{cur_m:02d}:{cur_s:02d} / {tot_m:02d}:{tot_s:02d}")
+        self.sfx_seek_slider.config(value=min(elapsed / total, 1.0))
+
+        self.after(100, self._update_sfx_time_loop)
+
+    def on_sfx_seek(self, slider_value):
+        if not self.current_sound or self.current_sfx_length <= 0:
+            return
+
+        ratio = float(slider_value)
+        target = ratio * self.current_sfx_length
+
+        # Rough seek: stop current and play from byte offset
+        # Convert PCM to NumPy for precise slicing is more accurate,
+        # but here we restart from approximate time by reloading buffer.
+        idx = self.sfx_listbox.curselection()[0]
+        snd = self.sfx_arc.sounds[idx]
+        pcm = snd['pcm']
+        rate = snd['rate']
+        total_samples = len(pcm) // 2  # 2 bytes per sample
+
+        sample_target = int(ratio * total_samples)
+        # slice raw PCM from sample_target onward
+        pcm_array = pcm[sample_target*2:]
+        wav = self.sfx_arc._wrap_wav(pcm_array, rate)
+
+        if self.current_sound:
+            self.current_sound.stop()
+
+        new_sound = pygame.mixer.Sound(buffer=wav)
+        self.current_sound = new_sound
+        self.current_sfx_length = new_sound.get_length()
+        self.sfx_start_time = time.time()
+        new_sound.play()
+
+        self._update_sfx_time_loop()
 
     def _update_progress(self, val, total):
         self.progress.config(maximum=total, value=val)
         self.update_idletasks()
+
 
 if __name__ == '__main__':
     App().mainloop()

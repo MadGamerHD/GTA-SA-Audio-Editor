@@ -22,6 +22,37 @@ def run_in_thread(fn):
         threading.Thread(target=lambda: fn(*args, **kwargs), daemon=True).start()
     return wrapper
 
+def xor_in_place_stride(data: bytearray, key: bytes, progress_callback=None):
+    """
+    XOR‐decrypt `data` in place using `key` by processing in stride‐based slices.
+    Calls progress_callback(processed_bytes, total_bytes) periodically.
+    """
+    total = len(data)
+    klen = len(key)
+    processed = 0
+    # We'll update progress every time we finish XOR’ing one full "j" pass,
+    # but only call back if we've moved forward by at least 4096 bytes.
+    last_report = 0
+
+    for j in range(klen):
+        # Take every klen‐th byte starting at j
+        sl = data[j:total:klen]
+        if not sl:
+            continue
+        # XOR that slice
+        xored = bytes(b ^ key[j] for b in sl)
+        data[j:total:klen] = xored
+
+        processed += len(sl)
+        # Call progress whenever we've passed another 4096 bytes
+        if progress_callback and (processed - last_report >= 4096):
+            last_report = processed
+            progress_callback(min(processed, total), total)
+
+    # Final callback to indicate completion
+    if progress_callback:
+        progress_callback(total, total)
+
 class StreamArchive:
     def __init__(self, path, progress_callback=None):
         self.filepath = Path(path)
@@ -29,19 +60,16 @@ class StreamArchive:
         self._decode_and_parse(progress_callback)
 
     def _decode_and_parse(self, progress_callback):
+        # Read entire encrypted file into a bytearray
         raw = self.filepath.read_bytes()
         data = bytearray(raw)
         total = len(data)
         key = ENCODE_KEY
-        klen = len(key)
 
-        for offset in range(0, total, klen):
-            chunk_size = min(klen, total - offset)
-            for j in range(chunk_size):
-                data[offset + j] ^= key[j]
-            if progress_callback and (offset % (klen * 256) == 0):
-                progress_callback(offset, total)
+        # Decrypt in place using stride‐based XOR
+        xor_in_place_stride(data, key, progress_callback)
 
+        # Now parse decrypted data into tracks
         mv = memoryview(data)
         offset = 0
         idx = 1
@@ -93,6 +121,7 @@ class StreamArchive:
         write_ptr = 0
         count = 0
 
+        # Rebuild the decrypted buffer (headers + data)
         for t in self.tracks:
             hdr = t['header']
             d = t['data']
@@ -108,15 +137,25 @@ class StreamArchive:
             if progress_callback:
                 progress_callback(count, total)
 
+        # Re‐encrypt entire buffer in place
         key = ENCODE_KEY
         klen = len(key)
         total_buf = len(buf)
+        processed = 0
+        last_report = 0
+
         for offset in range(0, total_buf, klen):
             chunk_size = min(klen, total_buf - offset)
             for j in range(chunk_size):
                 buf[offset + j] ^= key[j]
-            if progress_callback and (offset % (klen * 256) == 0):
-                progress_callback(offset, total_buf)
+            processed += chunk_size
+            if progress_callback and (processed - last_report >= 4096):
+                last_report = processed
+                progress_callback(min(processed, total_buf), total_buf)
+
+        # Final callback
+        if progress_callback:
+            progress_callback(total_buf, total_buf)
 
         self.filepath.write_bytes(buf)
 

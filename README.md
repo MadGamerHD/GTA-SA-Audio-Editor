@@ -7,6 +7,12 @@ A standalone Python tool to extract, replace, and rebuild audio assets in GTA S
 * In‑place rebuilding of modified files (with automatic re‑encryption for stream files).
 * Real‑time playback with current time/total duration display and seek controls for both Stream and SFX tabs.
 
+### 🔧 Features
+
+- ✅ OGG/WAV export and replacement
+- ✅ Rebuild with automatic re-encryption
+- ✅ Real-time preview with seeking
+
 ## Preview
 
 ![Screenshot 2025-06-01 192148](https://github.com/user-attachments/assets/41910e9b-21d6-46bb-9dc1-b92a9e833b35)

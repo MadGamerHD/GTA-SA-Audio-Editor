@@ -12,6 +12,7 @@ A standalone Python tool to extract, replace, and rebuild audio assets in GTA S
 - ✅ OGG/WAV export and replacement
 - ✅ Rebuild with automatic re-encryption
 - ✅ Real-time preview with seeking
+- Bug, Don't Use On SFX ATM
 
 ## Preview
 

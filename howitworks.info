@@ -1,0 +1,100 @@
+GTA San Andreas Audio Editor: Inside-Out Architecture & Tool Development Guide
+This document provides a comprehensive, deep-dive architectural breakdown of the GTA San Andreas Audio Editor codebase. It is designed both to explain the internal mechanics of the tool and to serve as a foundational blueprint for developers looking to build custom game asset editors or reverse-engineer proprietary file formats.
+1. High-Level Architecture Overview
+The tool follows a classic Model-View-Controller (MVC) pattern combined with a worker-thread model to maintain UI responsiveness during heavy I/O and cryptographic operations.
+┌────────────────────────────────────────────────────────┐
+│                        Tkinter UI                      │
+│   (AudioEditor Window, Tabs, Trees, Playback Sliders)  │
+└───────────────────────────┬────────────────────────────┘
+                            │ Delegates tasks / events
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                   Worker Threads                       │
+│        (Threading + Safe UI Thread Marshaling via      │
+│                  `self.after()`)                       │
+└───────┬───────────────────────────────┬────────────────┘
+        │                               │
+        ▼                               ▼
+┌───────────────┐               ┌───────────────┐
+│ StreamArchive │               │   SFXArchive  │
+│  (XOR Audio   │               │ (PakFiles.dat │
+│   Containers) │               │ BankLkup.dat) │
+└───────────────┘               └───────────────┘
+
+ * Core Dependencies: Python 3.10+, Tkinter (GUI, built-in), and Pygame (audio mixing/playback).
+ * Safety Protocols: Side-by-side timestamped backups (.backup-YYYYMMDD-HHMMSS) are automatically generated before any destructive write operation.
+2. Core Subsystems Breakdown
+A. Stream Archive Subsystem (StreamArchive)
+Stream archives store larger audio assets (radio stations, ambient loops, cutscenes) typically located in audio/streams/.
+ * Obfuscation (XOR Cipher):
+   Rockstar obfuscated these files using a repeating 16-byte XOR key:
+   
+   
+   To parse or export, the entire file byte array is processed via xor_in_place().
+ * Container Layout & Parsing:
+   * Each track consists of an 8,068-byte header (TRACK_HEADER_SIZE) followed immediately by the raw payload (typically Ogg Vorbis data).
+   * Dynamic Length Discovery: The parser scans offsets starting around index 8,000 within the header structure looking for valid uint32 values that are not padding (0xCDCDCDCD). This identifies the exact byte length of the following audio payload.
+ * In-Memory Replacement & Rebuilding:
+   * When replacing a track, the engine updates the 32-bit length field inside the track header in place so that structural integrity is maintained.
+   * Rebuilding concatenates headers and payloads sequentially, re-applies the XOR cipher, creates a backup, and overwrites the target file.
+B. Sound Effects (SFX) Subsystem (SFXArchive)
+SFX files handle sound effects, weapons, footstepps, and vehicle audio, managed through a relational index configuration.
+ * Configuration Mapping:
+   * PakFiles.dat: Contains 52-byte chunks listing the filenames of package containers inside audio/SFX/.
+   * BankLkup.dat: Contains 12-byte records mapping sound banks to package indices, header offsets, and PCM payload sizes.
+ * SFX Bank Structure:
+   * Bank Header (BANK_HEADER_SIZE = 4804 bytes): Begins with a sound count entry followed by up to 400 sound descriptors (12 bytes each):
+     * buf_off (uint32): Offset relative to the start of the bank's PCM block.
+     * loop_off (int32): Loop point sample index.
+     * rate (uint16): Sample rate (Hz).
+     * trim (int16): Volume trim/headroom adjustments.
+ * Rebuilding & Offset Propagation:
+   * Because sound effects can be swapped with custom audio files of varying lengths, banks can grow or shrink.
+   * The rebuild() routine recalculates all internal PCM offsets, updates the bank headers, shifts adjacent package data blocks, and updates absolute offsets and sizes inside BankLkup.dat.
+C. User Interface & Concurrency Model (AudioEditor)
+ * Thread Safety: File loading, exporting, and rebuilding execute inside background daemon threads (_run_worker). Progress updates and error dialogs are safely marshaled back to the main UI thread using self.after(0, ...).
+ * Audio Engine: Powered by pygame.mixer. SFX previews are loaded directly from memory buffers (io.BytesIO wrapped WAV byte streams), avoiding disk write overhead during rapid browsing.
+3. Blueprint: How to Build Your Own Tool
+If you want to use this architecture to build a custom asset manager for another game or engine, follow this extensible modular template:
+Step 1: Define Your Format Constants & Safety Wrappers
+Always establish strict boundaries for file layouts, magic numbers, and automatic backup routines before implementing parsers.
+import shutil
+import time
+from pathlib import Path
+
+def backup_file(path: Path) -> Path:
+    """Always protect user game files before writing."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.backup-{stamp}")
+    shutil.copy2(path, backup)
+    return backup
+
+Step 2: Implement a Robust Container Parser Class
+Structure your reader to validate boundaries defensively to prevent crashes caused by corrupted or modded files.
+class CustomPackageArchive:
+    def __init__(self, filepath: str):
+        self.filepath = Path(filepath)
+        self.assets = []
+        self._parse()
+
+    def _parse(self):
+        data = self.filepath.read_bytes()
+        # Implement header checks, magic bytes validation, and indexing here.
+        pass
+
+    def export_asset(self, index: int, output_dir: Path):
+        asset = self.assets[index]
+        out_path = output_dir / f"{asset['name']}.bin"
+        out_path.write_bytes(asset['data'])
+        return out_path
+
+Step 3: Decouple UI from Business Logic
+Keep file-parsing and binary manipulation methods completely independent of Tkinter or GUI frameworks. This allows your core logic to be tested headlessly or reused in command-line interfaces (CLIs).
+4. Summary Table of Key Offsets & Constants
+| Constant Name | Value / Type | Purpose |
+|---|---|---|
+| ENCODE_KEY | 16-byte Hex Blob | XOR cipher mask used to decode/encode stream containers. |
+| TRACK_HEADER_SIZE | 8068 bytes | Fixed header structure size preceding each stream track. |
+| BANK_HEADER_SIZE | 4804 bytes | Sound bank header size containing sound count and 12-byte descriptors. |
+| MAX_SOUNDS_PER_BANK | 400 | Maximum allowable descriptor slots per retail SFX sound bank. |
+| DEFAULT_SAMPLE_RATE | 22050 Hz | Fallback sample rate if metadata is unassigned or zero. |
